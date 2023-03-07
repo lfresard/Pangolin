@@ -1,7 +1,7 @@
 import argparse
 from pkg_resources import resource_filename
 from pangolin.model import *
-import vcf
+# import vcf
 import gffutils
 import pandas as pd
 import pyfastx
@@ -37,27 +37,27 @@ def compute_score(ref_seq, alt_seq, strand, d, models):
         alt_seq = alt_seq.to(torch.device("cuda"))
 
     pangolin = []
-    for j in range(4):
+    for j in range(4): # for each tissue
         score = []
-        for model in models[3*j:3*j+3]:
+        for model in models[3*j:3*j+3]: # each tissue was trained three times
             with torch.no_grad():
-                ref = model(ref_seq)[0][[1,4,7,10][j],:].cpu().numpy()
+                ref = model(ref_seq)[0][[1,4,7,10][j],:].cpu().numpy() # whether or not site is spliced for each pos of the sequence
                 alt = model(alt_seq)[0][[1,4,7,10][j],:].cpu().numpy()
                 if strand == '-':
                     ref = ref[::-1]
                     alt = alt[::-1]
                 l = 2*d+1
-                ndiff = np.abs(len(ref)-len(alt))
+                ndiff = np.abs(len(ref)-len(alt)) # adjust sequence length if needed
                 if len(ref)>len(alt):
                     alt = np.concatenate([alt[0:l//2+1],np.zeros(ndiff),alt[l//2+1:]])
                 elif len(ref)<len(alt):
                     alt = np.concatenate([alt[0:l//2],np.max(alt[l//2:l//2+ndiff+1], keepdims=True),alt[l//2+ndiff+1:]])
-                score.append(alt-ref)
-        pangolin.append(np.mean(score, axis=0))
+                score.append(alt-ref) # get difference in prob between alt and ref for each pos of seq
+        pangolin.append(np.mean(score, axis=0)) # for each tissue we get the mean result over three models
     
     pangolin = np.array(pangolin)
-    loss = pangolin[np.argmin(pangolin, axis=0), np.arange(pangolin.shape[1])]
-    gain = pangolin[np.argmax(pangolin, axis=0), np.arange(pangolin.shape[1])]
+    loss = pangolin[np.argmin(pangolin, axis=0), np.arange(pangolin.shape[1])] # min score across tissues
+    gain = pangolin[np.argmax(pangolin, axis=0), np.arange(pangolin.shape[1])] # max score across tissues
     return loss, gain
 
 
@@ -80,9 +80,7 @@ def get_genes(chr, pos, gtf):
     return (genes_pos, genes_neg)
 
 
-def process_variant(lnum, chr, pos, ref, alt, gtf, models, args):
-    d = args.distance
-    cutoff = args.score_cutoff
+def process_variant(lnum, chr, pos, ref, alt, gtf, models, d, reference_file, mask,cutoff):
 
     if len(set("ACGT").intersection(set(ref))) == 0 or len(set("ACGT").intersection(set(alt))) == 0 \
             or (len(ref) != 1 and len(alt) != 1 and len(ref) != len(alt)):
@@ -92,7 +90,7 @@ def process_variant(lnum, chr, pos, ref, alt, gtf, models, args):
         print("[Line %s]" % lnum, "WARNING, skipping variant: Deletion too large")
         return -1
 
-    fasta = pyfastx.Fasta(args.reference_file)
+    fasta = pyfastx.Fasta(reference_file)
     # try to make vcf chromosomes compatible with reference chromosomes
     if chr not in fasta.keys() and "chr"+chr in fasta.keys():
         chr = "chr"+chr
@@ -107,7 +105,7 @@ def process_variant(lnum, chr, pos, ref, alt, gtf, models, args):
                                   "See error message above.")
         return -1    
 
-    if seq[5000+d:5000+d+len(ref)] != ref:
+    if seq[5000+d:5000+d+len(ref)].upper() != ref:
         print("[Line %s]" % lnum, "WARNING, skipping variant: Mismatch between FASTA (ref base: %s) and variant file (ref base: %s)."
               % (seq[5000+d:5000+d+len(ref)], ref))
         return -1
@@ -135,7 +133,7 @@ def process_variant(lnum, chr, pos, ref, alt, gtf, models, args):
         for gene, positions in genes.items():
             warnings = "Warnings:"
 
-            if args.mask == "True" and len(positions) != 0:
+            if mask == "True" and len(positions) != 0:
                 positions = np.array(positions)
                 positions = positions - (pos - d)
 
@@ -146,7 +144,7 @@ def process_variant(lnum, chr, pos, ref, alt, gtf, models, args):
                 not_positions = ~np.isin(np.arange(len(loss)), positions_filt)
                 loss[not_positions] = np.maximum(loss[not_positions], 0)
 
-            elif args.mask == "True":
+            elif mask == "True":
                 warnings += "NoAnnotatedSitesToMaskForThisGene"
                 loss[:] = np.maximum(loss[:], 0)
 
@@ -162,8 +160,9 @@ def process_variant(lnum, chr, pos, ref, alt, gtf, models, args):
                 scores += "%s:%s|%s:%s|" % (g-d, round(gain[g],2), l-d, round(loss[l],2))
 
             scores += warnings
+            scores += "||"
 
-    return scores.strip('|')
+    return scores.strip('||')
 
 def main():
     parser = argparse.ArgumentParser()
@@ -181,6 +180,11 @@ def main():
 
     variants = args.variant_file
     gtf = args.annotation_file
+    d = args.distance
+    reference_file = args.reference_file
+    mask = args.mask
+    cutoff = args.score_cutoff
+
     try:
         gtf = gffutils.FeatureDB(gtf)
     except:
@@ -238,7 +242,7 @@ def main():
         for lnum, variant in variants.iterrows():
             chr, pos, ref, alt = variant[col_ids]
             ref, alt = ref.upper(), alt.upper()
-            scores = process_variant(lnum+1, str(chr), int(pos), ref, alt, gtf, models, args)
+            scores = process_variant(lnum+1, str(chr), int(pos), ref, alt, gtf, models, d, reference_file, mask, cutoff)
             if scores == -1:
                 fout.write(','.join(variant.to_csv(header=False, index=False).split('\n'))+'\n')
             else:
